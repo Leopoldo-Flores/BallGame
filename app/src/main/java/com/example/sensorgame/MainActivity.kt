@@ -52,6 +52,28 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+// CLASS 2
+import androidx.compose.foundation.Image
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.res.painterResource
+import kotlin.math.sqrt
+import kotlin.random.Random
+// CLASS 3
+import android.Manifest
+import android.content.pm.PackageManager
+import android.location.Location
+import android.os.Looper
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.core.content.ContextCompat
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import kotlinx.coroutines.launch
 
 
 // fixed on screen the size of the ball
@@ -100,6 +122,29 @@ fun SensorGameScreen() {
     // pixels the ball moves per gyro unit (per frame)
     val baseSpeed = 5f
 
+    // Accelerometer
+    val accelerometer = remember { sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) }
+    var lastShakeTime by remember { mutableStateOf(0L) }
+    val shakeThreshold = 12f // m/s2 above gravity
+    val shakeCooldownMs = 1500L // minimum ms between shakes
+
+    // Ball colour cycle
+    var colorIndex by remember { mutableIntStateOf(0) }
+    val ballColors = remember {
+        listOf(Color.Blue, Color.Red, Color.Green, Color.Magenta, Color.Yellow)
+    }
+
+    // Stars
+    val starPx = with(density) { 32.dp.toPx() }
+    val starCount = 5
+    val stars = remember { mutableStateListOf<Offset>() }
+
+    // FusedLocationProviderClient - google's recommended location API
+    val fusedLocation = remember { LocationServices.getFusedLocationProviderClient(context) }
+    var lastLocation by remember { mutableStateOf<Location?>(null) }
+    val rewardDistanceM = 10f //meters walked before reward triggers
+    val scope = rememberCoroutineScope()
+    var gpsButtonEnable by remember { mutableStateOf(true) }
 
     LaunchedEffect(Unit) {
         if (!hasGyroscope) Toast.makeText(context, "No gyroscope — use touch controls", Toast.LENGTH_LONG).show()
@@ -107,16 +152,113 @@ fun SensorGameScreen() {
 
     fun moveBallWithGyro() {
         if(!hasGyroscope) return
+        ballX = (ballX + gyroY * baseSpeed).coerceIn(0f, areaWidthPx - ballPx)
+        ballY = (ballY + gyroX * baseSpeed).coerceIn(0f, areaHeightPx - ballPx)
         // ASSIGNMENT 1
         // 1. Update ballX based on the horizontal gyroscope reading and baseSpeed
         // 2. Update ballY based on the vertical gyroscope reading and baseSpeed
         // 3. Keep the ball on screen — see Hour 1, Topic 5 for the technique
     }
 
+    fun spawnStars() {
+        stars.clear()
+        val bottomMarginPX = with(density) { 120.dp.toPx() }
+        val safeHeight = (areaHeightPx - bottomMarginPX).coerceAtLeast(starPx * 2)
+        repeat(starCount) {
+            val x = Random.nextFloat() * (areaWidthPx - starPx)
+            val y = Random.nextFloat() * (areaHeightPx - starPx)
+            stars.add(Offset(x, y))
+        }
+    }
+
+    fun checkStarCollisions() {
+        val ballRight = ballX + ballPx
+        val ballBottom = ballY + ballPx
+        val collected = mutableListOf<Offset>()
+        for (star in stars) {
+            if (ballX < star.x + starPx && ballRight > star.x &&
+                ballY < star.y + starPx && ballBottom > star.y) {
+                collected.add(star)
+            }
+        }
+        for (star in collected) {
+            stars.remove(star)
+            score += 10
+        }
+        if (stars.isEmpty()) spawnStars()
+    }
+
+    fun onNewLocation(location: Location) { // requirement: display current location. rounds to 5 decimal
+        gpsText = "Lat: ${"%.5f".format(location.latitude)}, " +
+                "Lon: ${"%.5f".format(location.longitude)}, "
+        // ASSIGNMENT 3
+        // 1. If we've seen a location before, compare it against this new one
+        // 2. Figure out how far the player has moved since that last fix
+        // 3. If they've gone far enough, reward them and update your baseline
+        // 4. Handle the very first fix, when there's nothing to compare against yet
+    }
+
+    val locationCallback = remember {
+        object : LocationCallback() {
+            override fun onLocationResult(result: LocationResult) { // REMOVE THE S ON Result(s)
+                result.lastLocation?.let { onNewLocation(it) }
+            }
+        }
+    }
+
+
+    fun startLocationUpdates() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED) return
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 2000L)
+            .setMinUpdateIntervalMillis(1000L)
+            .build()
+        try {
+            fusedLocation.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
+        } catch (e: SecurityException) {
+            gpsText = "Location Unavailable"
+        }
+    }
+
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) startLocationUpdates() else gpsText = "Location Permission Denied"
+    }
+
+    LaunchedEffect(Unit) {
+        val hasPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (hasPermission) startLocationUpdates() else locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
+
+    fun onShakeDetected() {
+        //ASSIGNMENT 3
+        //1. Move to the next colour in the list, wrapping back to the start after the last one
+        //2. Give the player some feedback that a shake was detected
+
+    }
+
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
+                when (event.sensor.type) {
+                    Sensor.TYPE_GYROSCOPE -> {
+                        gyroX = event.values[0]
+                        gyroY = event.values[1]
+                    }
+                    Sensor.TYPE_ACCELEROMETER -> {
+                        val ax = event.values[0]
+                        val ay = event.values[1]
+                        val az = event.values[2]
+                        // val net= work out how much force is being applied beyond gravity
+                        val now = System.currentTimeMillis()
+                        //if (net > shakeThreshold && now - lastShakeTime > shakeCooldownMs) {
+                            //lastShakeTime = now
+                            //onShakeDetected()
+                        //}
+                    }
+                }
                 // ASSIGNMENT 1
                 // 1. Check which sensor this event came from
                 // 2. If it's the gyroscope, store its readings so moveBallWithGyro() can use them
@@ -127,14 +269,17 @@ fun SensorGameScreen() {
             when (event) {
                 Lifecycle.Event.ON_RESUME ->
                     gyroscope?.let { sensorManager.registerListener(listener, it, SensorManager.SENSOR_DELAY_UI) }
-                Lifecycle.Event.ON_PAUSE ->
+                Lifecycle.Event.ON_PAUSE -> {
                     sensorManager.unregisterListener(listener)
+                    fusedLocation.removeLocationUpdates(locationCallback)  // SET OF {} after ON_PAUSE -> {... }
+                }                                                               //  CLOSE THE SET HERE }
                 else -> {}
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             sensorManager.unregisterListener(listener)
+            fusedLocation.removeLocationUpdates(locationCallback)
             lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
@@ -143,6 +288,7 @@ fun SensorGameScreen() {
         while (isActive) {
             delay(33L)
             moveBallWithGyro()
+            checkStarCollisions()
         }
     }
 
@@ -155,6 +301,7 @@ fun SensorGameScreen() {
                     areaHeightPx = coords.size.width.toFloat()
                     ballX = (areaWidthPx - ballPx) / 2f
                     ballY = (areaHeightPx - ballPx) / 2f
+                    spawnStars()
                 }
             }
             .pointerInput(Unit) {// Touch-to-drag: lets emulator move ball with cursor
@@ -179,8 +326,18 @@ fun SensorGameScreen() {
             modifier = Modifier
                 .offset { IntOffset(ballX.roundToInt(), ballY.roundToInt()) }
                 .size(BALL_SIZE.dp)
-                .background(Color.Blue, CircleShape)
+                .background(ballColors[colorIndex], CircleShape)
         )
+
+        stars.forEach { starPos ->
+            Image(
+                painter = painterResource(R.drawable.star_shape),
+                contentDescription = null,
+                modifier = Modifier
+                    .offset{ IntOffset(starPos.x.roundToInt(), starPos.y.roundToInt()) }
+                    .size(32.dp)
+            )
+        }
 
         Row(
             modifier = Modifier
@@ -188,10 +345,19 @@ fun SensorGameScreen() {
                 .padding(24.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Button(onClick = {/* class 3 */}, enabled = false) {
+            Button(onClick = { onShakeDetected() }, enabled = true) {
                 Text("Shake")
             }
-            Button(onClick = {/*class 3 */}, enabled = false) {
+            Button(onClick = {gpsButtonEnable = false  // before position: fixed location in LA
+                val base = Location("test").apply { latitude = 34.0522; longitude = -118.2437 }
+                                                       // after position: 0.0001 degrees north of "base": 11 meters
+                val current = Location("test").apply { latitude = 34.0523; longitude = -118.2437  }
+                lastLocation = base
+                onNewLocation(current)
+                scope.launch { delay(5000L); gpsButtonEnable = true }
+            },
+                enabled = gpsButtonEnable
+            ) {
                 Text("GPS + 10")
             }
         }
